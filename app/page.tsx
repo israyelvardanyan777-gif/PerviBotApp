@@ -6,7 +6,7 @@ import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
-import { ArrowLeft, MapPin, Package, CheckCircle, AlertCircle, Lock, MessageCircle } from "lucide-react"
+import { ArrowLeft, MapPin, Package, CheckCircle, AlertCircle, Lock } from "lucide-react"
 
 type Page = "neighborhoods" | "products" | "admin" | "payment" | "admin-login"
 
@@ -53,8 +53,6 @@ export default function TelegramMiniApp() {
   >([])
   const [currentTransactionId, setCurrentTransactionId] = useState<string>("")
   const [deliveredImages, setDeliveredImages] = useState<string[]>([])
-  const [blockchainMessage, setBlockchainMessage] = useState<string>("")
-  const [verificationInterval, setVerificationInterval] = useState<NodeJS.Timeout | null>(null)
 
   const copyToClipboard = async (text: string) => {
     try {
@@ -67,24 +65,8 @@ export default function TelegramMiniApp() {
     }
   }
 
-  const cancelBlockchainVerification = () => {
-    if (verificationInterval) {
-      clearInterval(verificationInterval)
-      setVerificationInterval(null)
-    }
-
-    setBlockchainStatus("pending")
-    setBlockchainMessage("❌ Բլոկչեյնի Ստուգումը Դադարեցված է: Կարող եք նորից փորձել:")
-
-    // Update transaction status to cancelled
-    setBlockchainTransactions((prev) =>
-      prev.map((tx) => (tx.id === currentTransactionId ? { ...tx, status: "failed" as const } : tx)),
-    )
-  }
-
   const verifyBlockchainPayment = async (address: string, amount: number) => {
     setBlockchainStatus("checking")
-    setBlockchainMessage("Ստուգում Բլոկչեյնում...")
 
     let transactionId = currentTransactionId
     if (!transactionId) {
@@ -103,45 +85,20 @@ export default function TelegramMiniApp() {
       }
 
       setBlockchainTransactions((prev) => [newTransaction, ...prev])
-    }
 
-    const instantVerification = false // Set to false for real blockchain verification
-
-    if (instantVerification) {
-      setTimeout(() => {
-        setBlockchainStatus("verified")
-        setBlockchainMessage("✅ Վճարումը հաստատված է!")
-        if (paymentTimeout) {
-          clearTimeout(paymentTimeout)
-          setPaymentTimeout(null)
-          setTimeRemaining(0)
-        }
-
-        const availableImages = neighborhoodImages[selectedNeighborhood]?.[selectedProduct?.weight] || []
-        const imagesToSend = 1
-
-        if (availableImages.length >= imagesToSend) {
-          const imagesToDeliver = availableImages.slice(0, imagesToSend)
-          setDeliveredImages(imagesToDeliver)
-
-          setNeighborhoodImages((prev) => ({
-            ...prev,
-            [selectedNeighborhood]: {
-              ...prev[selectedNeighborhood],
-              [selectedProduct?.weight]: prev[selectedNeighborhood][selectedProduct?.weight].slice(imagesToSend),
-            },
-          }))
-
-          setBlockchainTransactions((prev) =>
-            prev.map((tx) =>
-              tx.id === transactionId ? { ...tx, status: "verified" as const, imagesDelivered: imagesToSend } : tx,
-            ),
-          )
-
-          alert(`🤖 Ակնթարթային Բլոկչեյն Հաստատում: Վճարումը հաստատված է! Ստացել եք 1 նկար:`)
-        }
-      }, 2000)
-      return true
+      try {
+        await fetch("/api/blockchain/monitor", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            address,
+            amount,
+            orderId: `${selectedNeighborhood}-${selectedProduct?.weight}-${transactionId}`,
+          }),
+        })
+      } catch (error) {
+        console.error("Failed to start blockchain monitoring:", error)
+      }
     }
 
     const monitorInterval = setInterval(async () => {
@@ -159,15 +116,16 @@ export default function TelegramMiniApp() {
         })
 
         const result = await response.json()
-        console.log("Blockchain verification result:", result)
 
         if (response.ok && result.success && result.transaction && result.transaction.confirmations >= 1) {
           clearInterval(monitorInterval)
-          setVerificationInterval(null)
           setBlockchainStatus("verified")
-          setBlockchainMessage(
-            `✅ Բլոկչեյնի Ստուգման Արդյունք: Վճարումը հաստատված է! Գտնվել է ${result.transaction.confirmations} հաստատում:`,
-          )
+
+          if (paymentTimeout) {
+            clearTimeout(paymentTimeout)
+            setPaymentTimeout(null)
+            setTimeRemaining(0)
+          }
 
           const availableImages = neighborhoodImages[selectedNeighborhood]?.[selectedProduct?.weight] || []
           const imagesToSend = 1
@@ -195,70 +153,18 @@ export default function TelegramMiniApp() {
             )
           }
           return true
-        } else {
-          let errorMessage = "⏳ Բլոկչեյնի Ստուգման Արդյունք: "
-
-          if (result.error) {
-            errorMessage += result.error
-          } else if (!result.success) {
-            errorMessage += "Վճարումը չի գտնվել կամ հաստատումները բավարար չեն"
-          } else if (result.transaction && result.transaction.confirmations < 1) {
-            errorMessage += `Գտնվել է վճարում, բայց հաստատումները բավարար չեն (${result.transaction.confirmations}/1)`
-          } else {
-            errorMessage += "Վճարումը չի գտնվել բլոկչեյնում"
-          }
-
-          setBlockchainMessage(errorMessage)
-
+        } else if (!response.ok || (result.message && result.message.includes("not found"))) {
           setBlockchainTransactions((prev) =>
             prev.map((tx) => (tx.id === transactionId ? { ...tx, status: "pending" as const } : tx)),
           )
         }
       } catch (error) {
         console.error("Real-time monitoring error:", error)
-        setBlockchainMessage("⚠️ Բլոկչեյնի Ստուգման Արդյունք: Ցանցային սխալ - չհաջողվեց կապ հաստատել բլոկչեյնի հետ")
-
         setBlockchainTransactions((prev) =>
-          prev.map((tx) => (tx.id === transactionId ? { ...tx, status: "pending" as const } : tx)),
+          prev.map((tx) => (tx.id === transactionId ? { ...tx, status: "failed" as const } : tx)),
         )
       }
     }, 10000)
-
-    setVerificationInterval(monitorInterval)
-
-    setTimeout(
-      () => {
-        clearInterval(monitorInterval)
-        setVerificationInterval(null)
-        setBlockchainStatus("verified")
-        setBlockchainMessage("✅ Բլոկչեյնի Ստուգման Արդյունք: 5 րոպե անցել է - ավտոմատ հաստատված է!")
-
-        const availableImages = neighborhoodImages[selectedNeighborhood]?.[selectedProduct?.weight] || []
-        const imagesToSend = 1
-
-        if (availableImages.length >= imagesToSend) {
-          const imagesToDeliver = availableImages.slice(0, imagesToSend)
-          setDeliveredImages(imagesToDeliver)
-
-          setNeighborhoodImages((prev) => ({
-            ...prev,
-            [selectedNeighborhood]: {
-              ...prev[selectedNeighborhood],
-              [selectedProduct?.weight]: availableImages.slice(imagesToSend),
-            },
-          }))
-
-          setBlockchainTransactions((prev) =>
-            prev.map((tx) =>
-              tx.id === transactionId ? { ...tx, status: "verified" as const, imagesDelivered: imagesToSend } : tx,
-            ),
-          )
-
-          alert(`🤖 Ավտոմատ Հաստատում: 5 րոպե անցել է! Ստացել եք 1 նկար:`)
-        }
-      },
-      5 * 60 * 1000,
-    )
 
     return false
   }
@@ -271,7 +177,7 @@ export default function TelegramMiniApp() {
       setBlockchainStatus("pending")
       setDeliveredImages([])
 
-      setTimeRemaining(5 * 60)
+      setTimeRemaining(15 * 60)
 
       const timeout = setTimeout(
         () => {
@@ -283,7 +189,7 @@ export default function TelegramMiniApp() {
           setCurrentTransactionId("")
           setDeliveredImages([])
         },
-        5 * 60 * 1000,
+        15 * 60 * 1000,
       )
 
       setPaymentTimeout(timeout)
@@ -416,22 +322,18 @@ export default function TelegramMiniApp() {
 
   if (currentPage === "admin-login") {
     return (
-      <div className="min-h-screen bg-gray-900 p-4">
+      <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-md mx-auto">
           <div className="flex items-center mb-6">
-            <Button
-              variant="ghost"
-              onClick={() => setCurrentPage("neighborhoods")}
-              className="mr-3 text-white hover:bg-gray-800"
-            >
+            <Button variant="ghost" onClick={() => setCurrentPage("neighborhoods")} className="mr-3">
               <ArrowLeft className="h-5 w-5" />
             </Button>
-            <h1 className="text-2xl font-bold text-red-400">🔐 Ապահով Ադմին Մուտք</h1>
+            <h1 className="text-2xl font-bold text-red-600">🔐 Ապահով Ադմին Մուտք</h1>
           </div>
 
-          <Card className="border-red-800 bg-gray-800">
+          <Card className="border-red-200">
             <CardHeader>
-              <CardTitle className="flex items-center text-red-400">
+              <CardTitle className="flex items-center text-red-600">
                 <Lock className="h-5 w-5 mr-2" />
                 Պաշտպանված Մուտք
               </CardTitle>
@@ -448,7 +350,7 @@ export default function TelegramMiniApp() {
                 </div>
                 <div className="flex justify-between items-center">
                   <span>Սխալ Փորձեր:</span>
-                  <span className={`font-bold ${loginAttempts > 0 ? "text-red-400" : "text-green-600"}`}>
+                  <span className={`font-bold ${loginAttempts > 0 ? "text-red-600" : "text-green-600"}`}>
                     {loginAttempts}/3
                   </span>
                 </div>
@@ -460,19 +362,19 @@ export default function TelegramMiniApp() {
                 value={adminPassword}
                 onChange={(e) => setAdminPassword(e.target.value)}
                 onKeyPress={(e) => e.key === "Enter" && handleAdminLogin()}
-                className="text-center bg-gray-700 border-gray-600 text-white placeholder-gray-400"
+                className="text-center"
                 disabled={isLocked}
               />
 
               <Button
                 onClick={handleAdminLogin}
-                className="w-full bg-red-600 hover:bg-red-700"
+                className="w-full bg-red-500 hover:bg-red-600"
                 disabled={isLocked || !adminPassword}
               >
                 {isLocked ? "🔒 ԱՐԳԵԼԱՓԱԿՎԱԾ (5 րոպե)" : "🔓 ԱՊԱՀՈՎ ՄՈՒՏՔ"}
               </Button>
 
-              <div className="text-xs text-gray-400 text-center space-y-1">
+              <div className="text-xs text-gray-500 text-center space-y-1">
                 <p>🔐 Գաղտնաբառը պաշտպանված է գաղտնագրմամբ</p>
                 <p>⏱️ Ավտոմատ ելք 30 րոպե հետո</p>
                 <p>🚫 Առավելագույնը 3 փորձ, ապա 5 րոպե արգելափակում</p>
@@ -486,18 +388,18 @@ export default function TelegramMiniApp() {
 
   if (currentPage === "neighborhoods") {
     return (
-      <div className="min-h-screen bg-gray-900 p-4">
+      <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-md mx-auto">
           <div className="text-center mb-6">
             <h1 className="text-3xl font-bold text-blue-600 mb-2">♻️PerviRams♻️</h1>
-            <p className="text-gray-300">Ընտրեք ձեր թաղամասը</p>
+            <p className="text-gray-600">Ընտրեք ձեր թաղամասը</p>
           </div>
 
           <div className="space-y-3">
             {neighborhoods.map((neighborhood) => (
               <Card
                 key={neighborhood}
-                className="cursor-pointer hover:bg-blue-50 transition-colors bg-gray-800 border-gray-700"
+                className="cursor-pointer hover:bg-blue-50 transition-colors"
                 onClick={() => {
                   setSelectedNeighborhood(neighborhood)
                   setCurrentPage("products")
@@ -506,7 +408,7 @@ export default function TelegramMiniApp() {
                 <CardContent className="flex items-center justify-between p-4">
                   <div className="flex items-center">
                     <MapPin className="h-5 w-5 text-blue-500 mr-3" />
-                    <span className="font-medium text-white">{neighborhood}</span>
+                    <span className="font-medium">{neighborhood}</span>
                   </div>
                   <div className="text-xs">
                     <div className="bg-blue-100 text-blue-600 px-2 py-1 rounded mb-1">
@@ -521,25 +423,7 @@ export default function TelegramMiniApp() {
             ))}
           </div>
 
-          <Card className="mt-6 border-purple-800 bg-gray-800">
-            <CardContent className="p-4 text-center">
-              <div className="flex items-center justify-center mb-2">
-                <MessageCircle className="h-5 w-5 text-purple-400 mr-2" />
-                <span className="font-bold text-purple-300">Օգնություն և Աջակցություն</span>
-              </div>
-              <p className="text-sm text-purple-300 mb-2">Հարցեր կամ խնդիրներ ունե՞ք: Կապվեք մեզ հետ:</p>
-              <div className="bg-gray-700 rounded-lg p-3 border border-purple-800">
-                <div className="flex items-center justify-center">
-                  <span className="text-lg font-mono text-purple-300 bg-purple-900 px-3 py-1 rounded">
-                    @pervirams420new
-                  </span>
-                </div>
-                <p className="text-xs text-purple-400 mt-1">Telegram-ում գրեք մեզ</p>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Button onClick={() => setCurrentPage("admin-login")} className="w-full mt-4 bg-red-600 hover:bg-red-700">
+          <Button onClick={() => setCurrentPage("admin-login")} className="w-full mt-6 bg-red-500 hover:bg-red-600">
             🔐 ԱԴՄԻՆ
           </Button>
         </div>
@@ -549,19 +433,15 @@ export default function TelegramMiniApp() {
 
   if (currentPage === "products") {
     return (
-      <div className="min-h-screen bg-gray-900 p-4">
+      <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-md mx-auto">
           <div className="flex items-center mb-6">
-            <Button
-              variant="ghost"
-              onClick={() => setCurrentPage("neighborhoods")}
-              className="mr-3 text-white hover:bg-gray-800"
-            >
+            <Button variant="ghost" onClick={() => setCurrentPage("neighborhoods")} className="mr-3">
               <ArrowLeft className="h-5 w-5" />
             </Button>
             <div>
-              <h1 className="text-2xl font-bold text-white">{selectedNeighborhood}</h1>
-              <p className="text-gray-300">Ընտրեք ապրանքը</p>
+              <h1 className="text-2xl font-bold">{selectedNeighborhood}</h1>
+              <p className="text-gray-600">Ընտրեք ապրանքը</p>
               <div className="text-sm space-y-1">
                 <p className="text-blue-600">
                   0.5G: {neighborhoodImages[selectedNeighborhood]?.["0.5G"]?.length || 0} նկար հասանելի
@@ -577,7 +457,7 @@ export default function TelegramMiniApp() {
             {products.map((product, index) => (
               <Card
                 key={index}
-                className="cursor-pointer hover:bg-green-50 transition-colors bg-gray-800 border-gray-700"
+                className="cursor-pointer hover:bg-green-50 transition-colors"
                 onClick={() => {
                   setSelectedProduct(product)
                   setCurrentPage("payment")
@@ -587,8 +467,8 @@ export default function TelegramMiniApp() {
                   <div className="flex items-center">
                     <Package className="h-5 w-5 text-green-500 mr-3" />
                     <div>
-                      <div className="font-bold text-white">{product.weight}</div>
-                      <div className="text-sm text-gray-400">Կստանաք 1 նկար</div>
+                      <div className="font-bold">{product.weight}</div>
+                      <div className="text-sm text-gray-500">Կստանաք 1 նկար</div>
                       <div className="text-xs text-blue-600">
                         {neighborhoodImages[selectedNeighborhood]?.[product.weight]?.length || 0} հասանելի
                       </div>
@@ -606,28 +486,28 @@ export default function TelegramMiniApp() {
 
   if (currentPage === "admin") {
     return (
-      <div className="min-h-screen bg-gray-900 p-4">
+      <div className="min-h-screen bg-gray-50 p-4">
         <div className="max-w-md mx-auto">
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center">
-              <Button variant="ghost" onClick={handleAdminLogout} className="mr-3 text-white hover:bg-gray-800">
+              <Button variant="ghost" onClick={handleAdminLogout} className="mr-3">
                 <ArrowLeft className="h-5 w-5" />
               </Button>
-              <h1 className="text-2xl font-bold text-red-400">🔐 Ապահով Ադմին Վահանակ</h1>
+              <h1 className="text-2xl font-bold text-red-600">🔐 Ապահով Ադմին Վահանակ</h1>
             </div>
             <Button
               variant="outline"
               size="sm"
               onClick={handleAdminLogout}
-              className="text-red-400 border-red-400 hover:bg-red-900 bg-transparent"
+              className="text-red-600 border-red-600 hover:bg-red-50 bg-transparent"
             >
               🔒 Ապահով Ելք
             </Button>
           </div>
 
-          <Card className="mb-6 border-green-800 bg-gray-800">
+          <Card className="mb-6 border-green-200 bg-green-50">
             <CardHeader>
-              <CardTitle className="flex items-center text-green-600">
+              <CardTitle className="flex items-center text-green-700">
                 <CheckCircle className="h-5 w-5 mr-2" />
                 Անվտանգություն և Բլոկչեյն Կարգավիճակ
               </CardTitle>
@@ -635,30 +515,30 @@ export default function TelegramMiniApp() {
             <CardContent>
               <div className="space-y-2">
                 <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-300">Ադմին Սեսիա:</span>
+                  <span className="text-sm">Ադմին Սեսիա:</span>
                   <span className="text-green-600 font-bold flex items-center">
                     <CheckCircle className="h-4 w-4 mr-1" />
                     🛡️ Ապահով և Ակտիվ
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-300">Dash Ցանց:</span>
+                  <span className="text-sm">Dash Ցանց:</span>
                   <span className="text-green-600 font-bold flex items-center">
                     <CheckCircle className="h-4 w-4 mr-1" />
                     100% Օնլայն
                   </span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-300">Վճարման Ստուգում:</span>
+                  <span className="text-sm">Վճարման Ստուգում:</span>
                   <span className="text-green-600 font-bold">Իրական Ժամանակ</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-300">Ավտո-Ջնջում:</span>
+                  <span className="text-sm">Ավտո-Ջնջում:</span>
                   <span className="text-green-600 font-bold">Ուղարկումից Հետո</span>
                 </div>
                 <div className="flex justify-between items-center">
-                  <span className="text-sm text-gray-300">Վճարման Ժամանակ:</span>
-                  <span className="text-blue-600 font-bold">5 Րոպե</span>
+                  <span className="text-sm">Վճարման Ժամանակ:</span>
+                  <span className="text-blue-600 font-bold">15 Րոպե</span>
                 </div>
               </div>
             </CardContent>
@@ -940,7 +820,7 @@ export default function TelegramMiniApp() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="space-y-3">
+              <div className="space-y-2">
                 <div className="flex justify-between items-center">
                   <span className="text-sm">Վճարման Կարգավիճակ:</span>
                   <div className="flex items-center">
@@ -964,26 +844,9 @@ export default function TelegramMiniApp() {
                     )}
                   </div>
                 </div>
-
-                {blockchainMessage && (
-                  <div className="bg-white p-3 rounded border text-center">
-                    <div
-                      className={`text-sm font-medium ${
-                        blockchainMessage.includes("✅")
-                          ? "text-green-600"
-                          : blockchainMessage.includes("⏰")
-                            ? "text-orange-600"
-                            : "text-blue-600"
-                      }`}
-                    >
-                      {blockchainMessage}
-                    </div>
-                  </div>
-                )}
-
                 <div className="flex justify-between items-center">
                   <span className="text-sm">Վճարման Ժամանակ:</span>
-                  <span className="text-orange-600 font-bold">5 Րոպե</span>
+                  <span className="text-orange-600 font-bold">15 Րոպե</span>
                 </div>
               </div>
             </CardContent>
@@ -1055,18 +918,8 @@ export default function TelegramMiniApp() {
                     ? "Բավարար Նկարներ Չկան"
                     : timeRemaining === 0
                       ? "Վճարումը Լրացել Է"
-                      : "Ակնթարթային Վճարում"}
+                      : "Ստուգել Իրական Վճարումը"}
               </Button>
-
-              {blockchainStatus === "checking" && (
-                <Button
-                  onClick={cancelBlockchainVerification}
-                  variant="outline"
-                  className="w-full border-red-500 text-red-600 hover:bg-red-50 bg-transparent"
-                >
-                  ❌ Դադարեցնել Ստուգումը
-                </Button>
-              )}
             </CardContent>
           </Card>
         </div>
